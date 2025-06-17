@@ -12,10 +12,13 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
+	"os"
 	"os/exec"
+	"time"
 
 	gobirdc "github.com/StatCan/go-birdc"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // executeCommand executes a shell command and returns its output as a string.
@@ -43,11 +46,13 @@ func checkTailscalePrimaryRouter() bool {
 	cmd := "tailscale status --json --self"
 	output, err := executeCommand(cmd)
 	if err != nil {
+		log.Error().Err(err).Msg("Failed to execute command")
 		return false
 	}
 	// Parse the JSON output
 	parsedOutput, err := parseJSON(output)
 	if err != nil {
+		log.Error().Err(err).Msg("Failed to parse JSON output")
 		return false
 	}
 
@@ -62,25 +67,50 @@ func checkTailscalePrimaryRouter() bool {
 	return false
 }
 
-// main function to execute the command and parse the output
+// The program runs indefinitely in a loop, checking the Tailscale status and
+// updating the BIRD protocol state.
 func main() {
-	// Connect to the BIRD daemon using go-birdc
-	b := gobirdc.New(&gobirdc.BirdClientOptions{
-		Path: "/run/bird/bird.ctl"})
+	// Set up a logger
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+	log.Info().Msg("Starting Tailscale PrimaryRouter status checker")
+	// Keep track of the Tailscale PrimaryRouter status in a variable. There
+	// are three states: "unknown", "enabled", and "disabled".
+	var tailscalePrimaryRouterStatus string = "unknown"
 
-	// Check if the Tailscale PrimaryRouter is active
-	isPrimaryRouter := checkTailscalePrimaryRouter()
-	if isPrimaryRouter {
-		// If "PrimaryRoutes" is found, enable the "tailscale" protocol
-		_, _, err := b.EnableProtocol("tailscale")
-		if err != nil {
-			fmt.Println("Error enabling protocol:", err)
+	// Check the status in a loop
+	for {
+		// Connect to the BIRD daemon using go-birdc
+		b := gobirdc.New(&gobirdc.BirdClientOptions{
+			Path: "/run/bird/bird.ctl"})
+
+		// Check if the Tailscale PrimaryRouter is active
+		isPrimaryRouter := checkTailscalePrimaryRouter()
+		if isPrimaryRouter {
+			// If "PrimaryRoutes" is found and the status is "unknown" or "disabled" then enable the "tailscale" protocol
+			if tailscalePrimaryRouterStatus == "unknown" || tailscalePrimaryRouterStatus == "disabled" {
+				log.Info().Msg("Tailscale PrimaryRouter is active, enabling protocol")
+				_, _, err := b.EnableProtocol("tailscale")
+				if err != nil {
+					log.Error().Err(err).Msg("Failed to enable tailscale protocol")
+				} else {
+					log.Info().Msg("Tailscale PrimaryRouter protocol enabled successfully")
+					tailscalePrimaryRouterStatus = "enabled"
+				}
+			}
+		} else {
+			// If "PrimaryRoutes" is not found, disable the "tailscale" protocol
+			if tailscalePrimaryRouterStatus == "enabled" || tailscalePrimaryRouterStatus == "unknown" {
+				log.Info().Msg("Tailscale PrimaryRouter is inactive, disabling protocol")
+				_, _, err := b.DisableProtocol("tailscale")
+				if err != nil {
+					log.Error().Err(err).Msg("Failed to disable tailscale protocol")
+				} else {
+					log.Info().Msg("Tailscale PrimaryRouter protocol disabled successfully")
+					tailscalePrimaryRouterStatus = "disabled"
+				}
+			}
 		}
-	} else {
-		// If "PrimaryRoutes" is not found, disable the "tailscale" protocol
-		_, _, err := b.DisableProtocol("tailscale")
-		if err != nil {
-			fmt.Println("Error disabling protocol:", err)
-		}
+		// Sleep for 15 seconds before checking again
+		time.Sleep(15 * time.Second)
 	}
 }
